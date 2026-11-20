@@ -1,0 +1,90 @@
+/* ============================================================================
+   Fabric Mirroring Readiness - READ-ONLY ad-hoc query (no CREATE/deploy needed)
+   ----------------------------------------------------------------------------
+   Use this exact text as the "Query" on an ADF Copy activity's AzureSqlSource
+   (or paste into SSMS) against each of the 25 source databases. Needs only
+   SELECT rights on system catalog views, which db_datareader already grants
+   - no stored procedure, table, or any object needs to be created in the
+   source databases.
+   Returns ONE result set: one row per table with OverallVerdict
+   (BLOCKED / COLUMN LOSS / TRIM / OK) and the specific reasons.
+   ============================================================================ */
+
+DECLARE @HasLedgerCol bit = CASE WHEN COL_LENGTH('sys.tables', 'is_ledger') IS NOT NULL THEN 1 ELSE 0 END;
+
+DECLARE @Sql nvarchar(max) = N'
+;WITH tbl AS (
+    SELECT t.object_id, s.name AS SchemaName, t.name AS TableName
+    FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id
+    WHERE t.is_ms_shipped = 0
+),
+featDetail AS (  -- table-level blocking features, one aggregated reason string per table
+    SELECT object_id, STRING_AGG(reason, ''; '') AS Reasons
+    FROM (
+        SELECT object_id, ''Temporal''     AS reason FROM sys.tables WHERE temporal_type <> 0
+        UNION ALL SELECT object_id, ''In-Memory''    FROM sys.tables WHERE is_memory_optimized = 1
+        UNION ALL SELECT object_id, ''External''     FROM sys.tables WHERE is_external = 1
+        UNION ALL SELECT object_id, ''Graph-Node''   FROM sys.tables WHERE is_node = 1
+        UNION ALL SELECT object_id, ''Graph-Edge''   FROM sys.tables WHERE is_edge = 1'
+    + CASE WHEN @HasLedgerCol = 1 THEN N'
+        UNION ALL SELECT object_id, ''Ledger''       FROM sys.tables WHERE is_ledger = 1' ELSE N'' END
+    + N'
+        UNION ALL SELECT i.object_id, ''Columnstore''       FROM sys.indexes i WHERE i.type_desc LIKE ''%COLUMNSTORE%''
+        UNION ALL SELECT c.object_id, ''Always-Encrypted''  FROM sys.columns c WHERE c.column_encryption_key_id IS NOT NULL
+    ) x
+    GROUP BY object_id
+),
+pkDetail AS (  -- unsupported / precision-7 column used in the PK -> blocks whole table
+    SELECT c.object_id, STRING_AGG(CONCAT(''PK:'', c.name, '' ('', ty.name,
+               CASE WHEN ty.name IN (''datetime2'',''datetimeoffset'',''time'') THEN ''(7)'' ELSE '''' END, '')''), ''; '') AS Reasons
+    FROM sys.index_columns ic
+    JOIN sys.indexes i ON ic.object_id = i.object_id AND ic.index_id = i.index_id AND i.is_primary_key = 1
+    JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+    JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+    WHERE c.is_computed = 1 OR ty.is_user_defined = 1
+       OR ty.name IN (''geometry'',''geography'',''hierarchyid'',''sql_variant'',''timestamp'',''rowversion'')
+       OR (ty.name IN (''datetime2'',''datetimeoffset'',''time'') AND c.scale = 7)
+    GROUP BY c.object_id
+),
+colDropDetail AS (  -- columns that get dropped during mirroring (not PK, so table still mirrors)
+    SELECT c.object_id, STRING_AGG(CONCAT(c.name, '' ('', ty.name, '')''), ''; '') AS Reasons
+    FROM sys.columns c JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+    WHERE (c.is_computed = 1 OR ty.is_user_defined = 1
+       OR ty.name IN (''json'',''vector'',''image'',''text'',''ntext'',''xml'',''timestamp'',''rowversion'',''sql_variant'',''geometry'',''geography'',''hierarchyid''))
+      AND c.object_id NOT IN (SELECT object_id FROM pkDetail)
+    GROUP BY c.object_id
+),
+trimDetail AS (  -- precision-7 columns that survive but lose precision (not PK, so table still mirrors)
+    SELECT c.object_id, STRING_AGG(CONCAT(c.name, '' ('', ty.name, ''(7))''), ''; '') AS Reasons
+    FROM sys.columns c JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+    WHERE ty.name IN (''datetime2'',''datetimeoffset'',''time'') AND c.scale = 7
+      AND c.object_id NOT IN (SELECT object_id FROM pkDetail)
+    GROUP BY c.object_id
+)
+SELECT
+    DB_NAME()          AS DatabaseName,
+    tbl.SchemaName,
+    tbl.TableName,
+    CASE
+        WHEN featDetail.object_id IS NOT NULL OR pkDetail.object_id IS NOT NULL THEN ''BLOCKED''
+        WHEN colDropDetail.object_id IS NOT NULL THEN ''COLUMN LOSS''
+        WHEN trimDetail.object_id IS NOT NULL THEN ''TRIM''
+        ELSE ''OK''
+    END AS OverallVerdict,
+    CONCAT_WS('' | '', featDetail.Reasons, pkDetail.Reasons) AS BlockingReasons,
+    colDropDetail.Reasons AS ColumnsDropped,
+    trimDetail.Reasons    AS ColumnsTrimmed
+FROM tbl
+LEFT JOIN featDetail    ON featDetail.object_id    = tbl.object_id
+LEFT JOIN pkDetail      ON pkDetail.object_id      = tbl.object_id
+LEFT JOIN colDropDetail ON colDropDetail.object_id = tbl.object_id
+LEFT JOIN trimDetail    ON trimDetail.object_id    = tbl.object_id
+ORDER BY
+    CASE
+        WHEN featDetail.object_id IS NOT NULL OR pkDetail.object_id IS NOT NULL THEN 1
+        WHEN colDropDetail.object_id IS NOT NULL THEN 2
+        WHEN trimDetail.object_id IS NOT NULL THEN 3
+        ELSE 4
+    END, tbl.TableName;';
+
+EXEC sp_executesql @Sql;
