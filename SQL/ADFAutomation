@@ -1,3 +1,21 @@
+CREATE TABLE dbo.MirroringReadiness_Results
+(
+    ResultId         bigint IDENTITY(1,1) PRIMARY KEY,
+    RunId            uniqueidentifier NOT NULL,
+    RunDate          datetime2(0) NOT NULL DEFAULT (SYSUTCDATETIME()),
+    ServerName       nvarchar(128) NOT NULL,
+    DatabaseName     nvarchar(128) NOT NULL,
+    SchemaName       nvarchar(128) NOT NULL,
+    TableName        nvarchar(128) NOT NULL,
+    OverallVerdict   nvarchar(20)  NOT NULL,   -- BLOCKED / COLUMN LOSS / TRIM / OK
+    BlockingReasons  nvarchar(max) NULL,
+    ColumnsDropped   nvarchar(max) NULL,
+    ColumnsTrimmed   nvarchar(max) NULL
+);
+
+
+
+
 /* ============================================================================
    Fabric Mirroring Readiness - READ-ONLY ad-hoc query (no CREATE/deploy needed)
    ----------------------------------------------------------------------------
