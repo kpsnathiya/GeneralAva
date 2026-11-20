@@ -36,27 +36,34 @@ SELECT
    ---------------------------------------------------------------------------- */
 PRINT '=== 2. Table-level feature blocks ===';
 
+-- is_ledger only exists on engines with ledger table support; build the check dynamically so older engines don't error
+DECLARE @HasLedgerCol bit = CASE WHEN COL_LENGTH('sys.tables', 'is_ledger') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @Sql2 nvarchar(max) = N'
 SELECT s.name AS SchemaName, t.name AS TableName,
-    CONCAT_WS(', ',
-        CASE WHEN t.temporal_type <> 0      THEN 'Temporal'     END,
-        CASE WHEN t.is_memory_optimized = 1 THEN 'In-Memory'    END,
-        CASE WHEN t.is_external = 1         THEN 'External'      END,
-        CASE WHEN t.is_node = 1             THEN 'Graph-Node'    END,
-        CASE WHEN t.is_edge = 1             THEN 'Graph-Edge'    END,
-        CASE WHEN t.is_ledger = 1           THEN 'Ledger'        END,
-        CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id=t.object_id AND i.type_desc LIKE '%COLUMNSTORE%')
-             THEN 'Columnstore' END,
+    CONCAT_WS('', '',
+        CASE WHEN t.temporal_type <> 0      THEN ''Temporal''     END,
+        CASE WHEN t.is_memory_optimized = 1 THEN ''In-Memory''    END,
+        CASE WHEN t.is_external = 1         THEN ''External''      END,
+        CASE WHEN t.is_node = 1             THEN ''Graph-Node''    END,
+        CASE WHEN t.is_edge = 1             THEN ''Graph-Edge''    END,'
+    + CASE WHEN @HasLedgerCol = 1 THEN N' CASE WHEN t.is_ledger = 1 THEN ''Ledger'' END,' ELSE N'' END
+    + N'
+        CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id=t.object_id AND i.type_desc LIKE ''%COLUMNSTORE%'')
+             THEN ''Columnstore'' END,
         CASE WHEN EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=t.object_id AND c.column_encryption_key_id IS NOT NULL)
-             THEN 'Always-Encrypted' END
+             THEN ''Always-Encrypted'' END
     ) AS BlockingFeature
 FROM sys.tables t
 JOIN sys.schemas s ON t.schema_id = s.schema_id
 WHERE t.is_ms_shipped = 0
   AND ( t.temporal_type <> 0 OR t.is_memory_optimized = 1 OR t.is_external = 1
-     OR t.is_node = 1 OR t.is_edge = 1 OR t.is_ledger = 1
-     OR EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id=t.object_id AND i.type_desc LIKE '%COLUMNSTORE%')
+     OR t.is_node = 1 OR t.is_edge = 1'
+    + CASE WHEN @HasLedgerCol = 1 THEN N' OR t.is_ledger = 1' ELSE N'' END
+    + N'
+     OR EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id=t.object_id AND i.type_desc LIKE ''%COLUMNSTORE%'')
      OR EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=t.object_id AND c.column_encryption_key_id IS NOT NULL) )
-ORDER BY t.name;
+ORDER BY t.name;';
+EXEC sp_executesql @Sql2;
 
 /* ----------------------------------------------------------------------------
    3. COLUMN-LEVEL ISSUES  (dropped columns / json-vector / precision-7)
@@ -139,6 +146,8 @@ WHERE t.is_ms_shipped = 0
    ---------------------------------------------------------------------------- */
 PRINT '=== 6. Overall verdict per table ===';
 
+-- built as dynamic SQL so the is_ledger predicate is omitted entirely on engines without that column
+DECLARE @Sql6 nvarchar(max) = N'
 ;WITH tbl AS (
     SELECT t.object_id, s.name AS SchemaName, t.name AS TableName
     FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id
@@ -148,8 +157,10 @@ feat AS (  -- table-level blocks
     SELECT object_id FROM sys.tables
     WHERE is_ms_shipped = 0
       AND ( temporal_type <> 0 OR is_memory_optimized = 1 OR is_external = 1
-         OR is_node = 1 OR is_edge = 1 OR is_ledger = 1
-         OR EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id=sys.tables.object_id AND i.type_desc LIKE '%COLUMNSTORE%')
+         OR is_node = 1 OR is_edge = 1'
+    + CASE WHEN @HasLedgerCol = 1 THEN N' OR is_ledger = 1' ELSE N'' END
+    + N'
+         OR EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id=sys.tables.object_id AND i.type_desc LIKE ''%COLUMNSTORE%'')
          OR EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id=sys.tables.object_id AND c.column_encryption_key_id IS NOT NULL) )
 ),
 pkblock AS (  -- unsupported column in PK
@@ -159,26 +170,26 @@ pkblock AS (  -- unsupported column in PK
     JOIN sys.columns c ON ic.object_id=c.object_id AND ic.column_id=c.column_id
     JOIN sys.types ty ON c.user_type_id=ty.user_type_id
     WHERE c.is_computed=1 OR ty.is_user_defined=1
-       OR ty.name IN ('geometry','geography','hierarchyid','sql_variant','timestamp','rowversion')
-       OR (ty.name IN ('datetime2','datetimeoffset','time') AND c.scale=7)
+       OR ty.name IN (''geometry'',''geography'',''hierarchyid'',''sql_variant'',''timestamp'',''rowversion'')
+       OR (ty.name IN (''datetime2'',''datetimeoffset'',''time'') AND c.scale=7)
 ),
 coldrop AS (  -- columns that get dropped
     SELECT DISTINCT c.object_id
     FROM sys.columns c JOIN sys.types ty ON c.user_type_id=ty.user_type_id
     WHERE c.is_computed=1 OR ty.is_user_defined=1
-       OR ty.name IN ('json','vector','image','text','ntext','xml','timestamp','rowversion','sql_variant','geometry','geography','hierarchyid')
+       OR ty.name IN (''json'',''vector'',''image'',''text'',''ntext'',''xml'',''timestamp'',''rowversion'',''sql_variant'',''geometry'',''geography'',''hierarchyid'')
 ),
 trim AS (  -- precision-7 (non-PK) columns
     SELECT DISTINCT c.object_id
     FROM sys.columns c JOIN sys.types ty ON c.user_type_id=ty.user_type_id
-    WHERE ty.name IN ('datetime2','datetimeoffset','time') AND c.scale=7
+    WHERE ty.name IN (''datetime2'',''datetimeoffset'',''time'') AND c.scale=7
 )
 SELECT tbl.SchemaName, tbl.TableName,
     CASE
-        WHEN feat.object_id IS NOT NULL OR pkblock.object_id IS NOT NULL THEN 'BLOCKED - will NOT mirror'
-        WHEN coldrop.object_id IS NOT NULL THEN 'COLUMN LOSS - mirrors, some columns dropped'
-        WHEN trim.object_id IS NOT NULL THEN 'TRIM - mirrors, precision/size loss'
-        ELSE 'OK - mirrors cleanly'
+        WHEN feat.object_id IS NOT NULL OR pkblock.object_id IS NOT NULL THEN ''BLOCKED - will NOT mirror''
+        WHEN coldrop.object_id IS NOT NULL THEN ''COLUMN LOSS - mirrors, some columns dropped''
+        WHEN trim.object_id IS NOT NULL THEN ''TRIM - mirrors, precision/size loss''
+        ELSE ''OK - mirrors cleanly''
     END AS OverallVerdict
 FROM tbl
 LEFT JOIN feat    ON feat.object_id    = tbl.object_id
@@ -191,4 +202,5 @@ ORDER BY
         WHEN coldrop.object_id IS NOT NULL THEN 2
         WHEN trim.object_id IS NOT NULL THEN 3
         ELSE 4
-    END, tbl.TableName;
+    END, tbl.TableName;';
+EXEC sp_executesql @Sql6;
