@@ -14,19 +14,6 @@ CREATE TABLE dbo.MirroringReadiness_Results
 );
 
 
-
-/* ============================================================================
-   Fabric Mirroring Readiness - READ-ONLY ad-hoc query (no CREATE/deploy needed)
-   ----------------------------------------------------------------------------
-   Use this exact text as the "Query" on an ADF Copy activity's AzureSqlSource
-   (or paste into SSMS) against each of the 25 source databases. Needs only
-   SELECT rights on system catalog views, which db_datareader already grants
-   - no stored procedure, table, or any object needs to be created in the
-   source databases.
-   Returns ONE result set: one row per table with OverallVerdict
-   (BLOCKED / COLUMN LOSS / TRIM / OK) and the specific reasons.
-   ============================================================================ */
-
 DECLARE @HasLedgerCol bit = CASE WHEN COL_LENGTH('sys.tables', 'is_ledger') IS NOT NULL THEN 1 ELSE 0 END;
 
 DECLARE @Sql nvarchar(max) = N'
