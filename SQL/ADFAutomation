@@ -15,7 +15,6 @@ CREATE TABLE dbo.MirroringReadiness_Results
 
 
 
-
 /* ============================================================================
    Fabric Mirroring Readiness - READ-ONLY ad-hoc query (no CREATE/deploy needed)
    ----------------------------------------------------------------------------
@@ -39,7 +38,7 @@ DECLARE @Sql nvarchar(max) = N'
 featDetail AS (  -- table-level blocking features, one aggregated reason string per table
     SELECT object_id, STRING_AGG(reason, ''; '') AS Reasons
     FROM (
-        SELECT object_id, ''Temporal''     AS reason FROM sys.tables WHERE temporal_type <> 0
+            SELECT object_id, ''Temporal-History'' AS reason FROM sys.tables WHERE temporal_type = 1
         UNION ALL SELECT object_id, ''In-Memory''    FROM sys.tables WHERE is_memory_optimized = 1
         UNION ALL SELECT object_id, ''External''     FROM sys.tables WHERE is_external = 1
         UNION ALL SELECT object_id, ''Graph-Node''   FROM sys.tables WHERE is_node = 1
@@ -106,3 +105,4 @@ ORDER BY
     END, tbl.TableName;';
 
 EXEC sp_executesql @Sql;
+
